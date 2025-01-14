@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    network_mode: "host"
+    volumes:
+      - /var/lib/postgresql/data
+      - ./AirbnbData:/var/lib/postgresql/AirbnbData
+    ports:
+      - "5432:5432"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+
+ 
+volumes:
+  pgdata:
