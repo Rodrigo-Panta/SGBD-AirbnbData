@@ -137,45 +137,59 @@ WHERE
 
 
 ---------------------------------------------------------------------------------------------------------------
---  Consulta 3: Propriedades que tiveram avaliações no ano mais recente da tabela e a data da review mais recente
+--  Consulta 3: Propriedades com o maior número de reviews por ano
+EXPLAIN
+WITH review_count_by_year_and_listing AS (
+    SELECT 
+        l.listing_id,
+        l.name,
+        date_part('year', r.date) AS _year,
+        COUNT(*) AS year_count
+    FROM 
+        airbnb_data.listings l
+    INNER JOIN 
+        airbnb_data.reviews r
+    ON 
+        l.listing_id = r.listing_id 
+    GROUP BY 
+        date_part('year', r.date),
+        l.listing_id,
+        l.name
+),
+max_reviews_by_year AS (
+    SELECT 
+        _year,
+        MAX(year_count) AS max_count
+    FROM 
+        review_count_by_year_and_listing
+    GROUP BY 
+        _year
+)
 SELECT 
-    l.listing_id,
-    l.name,
-    l.host_id,
-    l.neighbourhood,
-    l.price,
-    MAX(r.date) as latest_review_date
+    rcy._year,
+    rcy.listing_id,
+    rcy.name,
+    rcy.year_count AS num_reviews
 FROM 
-    airbnb_data.listings l
+    review_count_by_year_and_listing rcy
 INNER JOIN 
-    airbnb_data.reviews r
+    max_reviews_by_year mry
 ON 
-    l.listing_id = r.listing_id
-WHERE 
-    date_part('year', r.date) = (SELECT date_part('year', MAX(date)) FROM airbnb_data.reviews)    
-GROUP BY l.listing_id;
+    rcy._year = mry._year AND rcy.year_count = mry.max_count
+ORDER BY 
+    rcy._year;
 ---------------------------------------------------------------------------------------------------------------
 
 ---------------------------------------------------------------------------------------------------------------
---  Consulta 4: Propriedades que foram avaliadas mais de uma vez pela mesma pessoa
+--  Consulta 4: Número de reviews por reviewer
+-- EXPLAIN
 SELECT 
-    l.listing_id,
-    l.name,
-    l.host_id,
-    l.neighbourhood,
-    l.price,
-    COUNT(r.reviewer_id) AS total_reviews
-FROM 
-    airbnb_data.listings l
-INNER JOIN 
+    r.reviewer_id,
+    COUNT(*)
+FROM
     airbnb_data.reviews r
-ON 
-    l.listing_id = r.listing_id
 GROUP BY 
-    l.listing_id
-HAVING 
-    COUNT(r.reviewer_id) > 1;
-
+    r.reviewer_id;
 ---------------------------------------------------------------------------------------------------------------
 
 ---------------------------------------------------------------------------------------------------------------
@@ -205,13 +219,91 @@ ORDER BY
 ---------------------------------------------------------------------------------------------------------------
 -- Otimização:
 ---------------------------------------------------------------------------------------------------------------
--- Comandos executados para a melhoria da Consulta 1 e 2:
+-- Comandos executados para a melhoria da Consulta 1, 2 e 5:
 CREATE INDEX idx_listings_listing_id ON airbnb_data.listings(listing_id);
 CREATE INDEX idx_reviews_listing_id_hash ON airbnb_data.reviews USING HASH (listing_id);
 ANALYZE airbnb_data.reviews;
 ANALYZE airbnb_data.listings;
 SET enable_seqscan = off;
 ---------------------------------------------------------------------------------------------------------------
+-- Comandos executados para a melhoria da Consulta 3:
+-- Comandos realizados para criação da tabela particionada e execução da consulta
+-- Cria a tabela reviews particionada pelo ano da coluna date
+CREATE TABLE airbnb_data.reviews_partitioned (
+    listing_id INT,
+    review_id INT,
+    date DATE NOT NULL,
+    reviewer_id INT
+) PARTITION BY RANGE (EXTRACT(YEAR FROM date));
+
+-- Criação das partições para cada ano de 2008 a 2021
+DO $$
+BEGIN
+    FOR yr IN 2008..2021 LOOP
+        EXECUTE format(
+            'CREATE TABLE airbnb_data.reviews_%s PARTITION OF airbnb_data.reviews_partitioned
+             FOR VALUES FROM (%s) TO (%s);',
+            yr, yr, yr + 1
+        );
+    END LOOP;
+END $$;
+
+-- População da tabela particionada com todas as linhas da tabela review
+INSERT INTO airbnb_data.reviews_partitioned (listing_id, review_id, date, reviewer_id)
+SELECT listing_id, review_id, date, reviewer_id
+FROM airbnb_data.reviews;
+
+-- Mudança do texto da consulta para utilização da tabela particionada
+EXPLAIN
+WITH review_count_by_year_and_listing AS (
+    SELECT 
+        l.listing_id,
+        l.name,
+        date_part('year', r.date) AS _year,
+        COUNT(*) AS year_count
+    FROM 
+        airbnb_data.listings l
+    INNER JOIN 
+        airbnb_data.reviews_partitioned r
+    ON 
+        l.listing_id = r.listing_id 
+    GROUP BY 
+        date_part('year', r.date),
+        l.listing_id,
+        l.name
+),
+max_reviews_by_year AS (
+    SELECT 
+        _year,
+        MAX(year_count) AS max_count
+    FROM 
+        review_count_by_year_and_listing
+    GROUP BY 
+        _year
+)
+SELECT 
+    rcy._year,
+    rcy.listing_id,
+    rcy.name,
+    rcy.year_count AS num_reviews
+FROM 
+    review_count_by_year_and_listing rcy
+INNER JOIN 
+    max_reviews_by_year mry
+ON 
+    rcy._year = mry._year AND rcy.year_count = mry.max_count
+ORDER BY 
+    rcy._year;
+---------------------------------------------------------------------------------------------------------------
+-- Comandos executados para a melhoria da Consulta 4:
+CREATE INDEX idx_reviewer_id ON airbnb_data.reviews(reviewer_id);
+---------------------------------------------------------------------------------------------------------------
+
+---------------------------------------------------------------------------------------------------------------
+-- RESULTADOS
+---------------------------------------------------------------------------------------------------------------
+
+
 /*
  Consulta 1:
     Tentativa de melhoria:
@@ -313,10 +405,79 @@ SET enable_seqscan = off;
 /*
  Consulta 3
     Tentativa de melhoria:
-    Particionamento de review sobre a coluna neighbourhood
-    
+        Particionamento de review sobre o ano da coluna date
+        Rodar ANALYZE em ambas as tabelas para atualização das estatísticas
+
+
     Antes da melhoria:
-        Tempo de execução médio: 11.7s
+        Tempo de execução médio: 11.5s
+        Plano de execução:
+            Sort  (cost=293076.18..293088.20 rows=4805 width=536)
+                Sort Key: rcy._year
+                CTE review_count_by_year_and_listing
+                    ->  Finalize GroupAggregate  (cost=118631.99..244491.28 rows=960911 width=58)
+                        Group Key: (date_part('year'::text, (r.date)::timestamp without time zone)), l.listing_id, l.name
+                        ->  Gather Merge  (cost=118631.99..222070.01 rows=800760 width=58)
+                                Workers Planned: 2
+                                ->  Partial GroupAggregate  (cost=117631.97..128642.42 rows=400380 width=58)
+                                    Group Key: (date_part('year'::text, (r.date)::timestamp without time zone)), l.listing_id, l.name
+                                    ->  Sort  (cost=117631.97..118632.92 rows=400380 width=50)
+                                            Sort Key: (date_part('year'::text, (r.date)::timestamp without time zone)), l.listing_id, l.name
+                                            ->  Hash Join  (cost=812.26..66689.59 rows=400380 width=50)
+                                                Hash Cond: (r.listing_id = l.listing_id)
+                                                ->  Parallel Seq Scan on reviews r  (cost=0.00..51476.10 rows=2238810 width=8)
+                                                ->  Hash  (cost=685.45..685.45 rows=10145 width=42)
+                                                        ->  Seq Scan on listings l  (cost=0.00..685.45 rows=10145 width=42)
+                ->  Hash Join  (cost=24027.78..48291.07 rows=4805 width=536)
+                        Hash Cond: ((rcy._year = review_count_by_year_and_listing._year) AND (rcy.year_count = (max(review_count_by_year_and_listing.year_count))))
+                        ->  CTE Scan on review_count_by_year_and_listing rcy  (cost=0.00..19218.22 rows=960911 width=536)
+                        ->  Hash  (cost=24024.78..24024.78 rows=200 width=16)
+                            ->  GroupAggregate  (cost=0.00..24024.78 rows=200 width=16)
+                                    Group Key: review_count_by_year_and_listing._year
+                                    ->  CTE Scan on review_count_by_year_and_listing  (cost=0.00..19218.22 rows=960911 width=16)
+
+    Após a melhoria:
+        Tempo de execução médio: 12.6
+        Plano de execução:
+            Sort  (cost=1032931.35..1032956.71 rows=10145 width=536)
+                Sort Key: rcy._year
+                CTE review_count_by_year_and_listing
+                    ->  HashAggregate  (cost=792449.11..927864.40 rows=2029000 width=58)
+                        Group Key: date_part('year'::text, (r.date)::timestamp without time zone), l.listing_id, l.name
+                        Planned Partitions: 64
+                        ->  Hash Join  (cost=812.26..211278.21 rows=5374991 width=50)
+                                Hash Cond: (r.listing_id = l.listing_id)
+                                ->  Append  (cost=0.00..109684.86 rows=5374991 width=8)
+                                    ->  Seq Scan on reviews_2008 r_1  (cost=0.00..28.50 rows=1850 width=8)
+                                    ->  Seq Scan on reviews_2009 r_2  (cost=0.00..2.15 rows=115 width=8)
+                                    ->  Seq Scan on reviews_2010 r_3  (cost=0.00..19.36 rows=1236 width=8)
+                                    ->  Seq Scan on reviews_2011 r_4  (cost=0.00..96.53 rows=6253 width=8)
+                                    ->  Seq Scan on reviews_2012 r_5  (cost=0.00..307.22 rows=19922 width=8)
+                                    ->  Seq Scan on reviews_2013 r_6  (cost=0.00..779.22 rows=50522 width=8)
+                                    ->  Seq Scan on reviews_2014 r_7  (cost=0.00..1882.32 rows=122132 width=8)
+                                    ->  Seq Scan on reviews_2015 r_8  (cost=0.00..4319.32 rows=280332 width=8)
+                                    ->  Seq Scan on reviews_2016 r_9  (cost=0.00..7730.54 rows=501754 width=8)
+                                    ->  Seq Scan on reviews_2017 r_10  (cost=0.00..11974.00 rows=777200 width=8)
+                                    ->  Seq Scan on reviews_2018 r_11  (cost=0.00..17600.96 rows=1142496 width=8)
+                                    ->  Seq Scan on reviews_2019 r_12  (cost=0.00..25165.46 rows=1633546 width=8)
+                                    ->  Seq Scan on reviews_2020 r_13  (cost=0.00..11636.24 rows=755324 width=8)
+                                    ->  Seq Scan on reviews_2021 r_14  (cost=0.00..1268.09 rows=82309 width=8)
+                                ->  Hash  (cost=685.45..685.45 rows=10145 width=42)
+                                    ->  Seq Scan on listings l  (cost=0.00..685.45 rows=10145 width=42)
+                ->  Hash Join  (cost=50730.00..101962.87 rows=10145 width=536)
+                        Hash Cond: ((rcy._year = review_count_by_year_and_listing._year) AND (rcy.year_count = (max(review_count_by_year_and_listing.year_count))))
+                        ->  CTE Scan on review_count_by_year_and_listing rcy  (cost=0.00..40580.00 rows=2029000 width=536)
+                        ->  Hash  (cost=50727.00..50727.00 rows=200 width=16)
+                            ->  HashAggregate  (cost=50725.00..50727.00 rows=200 width=16)
+                                    Group Key: review_count_by_year_and_listing._year
+                                    ->  CTE Scan on review_count_by_year_and_listing  (cost=0.00..40580.00 rows=2029000 width=16)
+
+    - Antes e depois da melhoria, após rodar as subconsultas, o otimizador escolheu um hash join para agregar os resultados das duas subconsultas sob as quais é feito um inner join
+        pelas colunas ano e quantidade de reviews;
+    - A principal diferença entre os dois planos é o estágio inicial:
+        - O primeiro utiliza parallel seq scan nas duas tabelas após criar uma hash table e assim fazer o join presente nas subconsultas;
+        - O segundo faz uma busca sequencial em cada partição paara agrupar por ano e em seguida também realiza um Hash join criando uma tabela hash;
+        - Porém, o uso do particionamento não trouxe ganho efetivo, sendo que na média o tempo de execução piorou cerca de 1s após a sua aplicação.
 */
 ---------------------------------------------------------------------------------------------------------------
 
@@ -325,11 +486,26 @@ SET enable_seqscan = off;
 /*
  Consulta 4
     Tentativa de melhoria:
-    Criação de índice não único pela coluna bedrooms de listing
+        Criação de índice não único pela coluna reviewer_id de reviews
     
     Antes da melhoria:
         Tempo de execução médio: 7.0s
+        Plano de execução:
+            HashAggregate  (cost=385058.72..457814.48 rows=3077808 width=12)
+                Group Key: reviewer_id
+                Planned Partitions: 64
+                ->  Seq Scan on reviews r  (cost=0.00..82819.43 rows=5373143 width=4)
 
+    Após a melhoria:
+        Tempo de execução médio: 39s
+        Plano de execução:
+            GroupAggregate  (cost=0.43..193657.06 rows=3077808 width=12)
+                Group Key: reviewer_id
+                ->  Index Only Scan using idx_reviewer_id on reviews r  (cost=0.43..136013.27 rows=5373143 width=4)
+
+    Dessa vez, o otimizador utilizou uma busca sequencial antes da otimização;
+    Após a criação do indice, ele usou uma busca pelo índice, já que a coluna na cláusula WHERE era a do indice;
+    Dessa forma, houve uma melhoria
 */
 ---------------------------------------------------------------------------------------------------------------
 
