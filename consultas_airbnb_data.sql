@@ -95,7 +95,6 @@ O SGBD escolhido foi o Postgres SQL.
 
 ---------------------------------------------------------------------------------------------------------------
 -- Consulta 1: Número de reviews por bairro com total de listings, preço médio e total de reviews
-SET enable_seqscan = on;
 EXPLAIN
 SELECT 
     l.neighbourhood,
@@ -194,6 +193,8 @@ GROUP BY
 
 ---------------------------------------------------------------------------------------------------------------
 --  Consulta 5: Superhosts Instantaneamente Reserváveis
+SET enable_seqscan=off;
+EXPLAIN
 SELECT 
     l.listing_id,
     l.name,
@@ -366,10 +367,9 @@ CREATE INDEX idx_reviewer_id ON airbnb_data.reviews(reviewer_id);
 /*
  Consulta 2
     Tentativa de melhoria:
-        Mesmas otimizações utilizadas na consulta 1, pois a consulta 2 também realiza junção entre as duas tabelas;
-            Criação de índice sobre a chave primária listing_id da tabela listing
-            Criação de índice hash sobre a chave estrangeira listing_id da tabela reviews
-            Rodar ANALYZE em ambas as tabelas para atualização das estatísticas
+        Criação de índice sobre a chave primária listing_id da tabela listing
+        Criação de índice hash sobre a chave estrangeira listing_id da tabela reviews
+        Rodar ANALYZE em ambas as tabelas para atualização das estatísticas
 
     Antes da melhoria:
         Tempo de execução médio: 4.1s
@@ -497,7 +497,7 @@ CREATE INDEX idx_reviewer_id ON airbnb_data.reviews(reviewer_id);
                 ->  Seq Scan on reviews r  (cost=0.00..82819.43 rows=5373143 width=4)
 
     Após a melhoria:
-        Tempo de execução médio: 39s
+        Tempo de execução médio: 2.0s
         Plano de execução:
             GroupAggregate  (cost=0.43..193657.06 rows=3077808 width=12)
                 Group Key: reviewer_id
@@ -512,10 +512,46 @@ CREATE INDEX idx_reviewer_id ON airbnb_data.reviews(reviewer_id);
 /*
  Consulta 5
     Tentativa de melhoria:
-    Uso de estatísticas em ambas as tabelas
+        Criação de índice sobre a chave primária listing_id da tabela listing
+        Criação de índice hash sobre a chave estrangeira listing_id da tabela reviews
+        Uso de estatísticas em ambas as tabelas
     
     Antes da melhoria:
         Tempo de execução médio: 4.2s
+        Plano de execução:
+            Sort  (cost=61856.87..61857.07 rows=83 width=66)
+                Sort Key: (count(r.review_id)) DESC
+                    ->  Finalize GroupAggregate  (cost=61782.19..61854.22 rows=83 width=66)
+                            Group Key: l.listing_id, l.name, l.host_id, l.neighbourhood
+                            ->  Gather Merge  (cost=61782.19..61851.32 rows=166 width=66)
+                                Workers Planned: 2
+                                ->  Partial GroupAggregate  (cost=60782.16..60832.13 rows=83 width=66)
+                                        Group Key: l.listing_id, l.name, l.host_id, l.neighbourhood
+                                        ->  Sort  (cost=60782.16..60790.35 rows=3276 width=62)
+                                            Sort Key: l.listing_id, l.name, l.host_id, l.neighbourhood
+                                            ->  Hash Join  (cost=686.49..60590.88 rows=3276 width=62)
+                                                    Hash Cond: (r.listing_id = l.listing_id)
+                                                    ->  Parallel Seq Scan on reviews r  (cost=0.00..51476.10 rows=2238810 width=8)
+                                                    ->  Hash  (cost=685.45..685.45 rows=83 width=58)
+                                                        ->  Seq Scan on listings l  (cost=0.00..685.45 rows=83 width=58)
+    
+    Tempo de execução médio: 1.5s
+    Plano de execução:
+        Sort  (cost=29715.34..29715.55 rows=83 width=66)
+        Sort Key: (count(r.review_id)) DESC
+        ->  HashAggregate  (cost=29711.86..29712.69 rows=83 width=66)
+                Group Key: l.listing_id, l.name, l.host_id, l.neighbourhood
+                ->  Nested Loop  (cost=5.01..29614.28 rows=7807 width=62)
+                    ->  Index Scan using idx_listings_listing_id on listings l  (cost=0.29..2594.24 rows=83 width=58)
+                            Filter: (host_is_superhost AND instant_bookable)
+                    ->  Bitmap Heap Scan on reviews r  (cost=4.73..324.60 rows=94 width=8)
+                            Recheck Cond: (l.listing_id = listing_id)
+                            ->  Bitmap Index Scan on idx_reviews_listing_id_hash  (cost=0.00..4.71 rows=94 width=0)
+                                Index Cond: (listing_id = l.listing_id)                                                            Filter: (host_is_superhost AND instant_bookable)
+
+    - Assim como nas consultas 1 e 2, após a criação dos índices, o uso de busca sequencial seguido por criação de
+        tabelas hashes foi substituído por uma busca por índice.
+    - Como consequência, o tempo de execução melhorou bastante.
 */
 ---------------------------------------------------------------------------------------------------------------
 
