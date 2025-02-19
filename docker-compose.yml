@@ -10,7 +10,24 @@ services:
       - ./AirbnbData:/var/lib/postgresql/AirbnbData
     ports:
       - "5432:5432"
-    
- 
-volumes:
-  pgdata:
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+    user: "${UID}:${GID}"  
+  mongodb:
+    image: mongo
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo
+      MONGO_INITDB_ROOT_PASSWORD: password
+    volumes:
+      - /data/db
+      - ./AirbnbData:/data/AirbnbData
+    ports:
+      - "27017:27017"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.1"
+

@@ -95,7 +95,6 @@ O SGBD escolhido foi o Postgres SQL.
 
 ---------------------------------------------------------------------------------------------------------------
 -- Consulta 1: Número de reviews por bairro com total de listings, preço médio e total de reviews
-EXPLAIN
 SELECT 
     l.neighbourhood,
     COUNT(l.listing_id) AS total_listings,
@@ -116,8 +115,6 @@ ORDER BY
 
 ---------------------------------------------------------------------------------------------------------------
 --  Consulta 2: Propriedades sem Reviews e sem hospedeiro identificado
-SET enable_seqscan = off;
-EXPLAIN
 SELECT 
     l.listing_id,
     l.name,
@@ -137,7 +134,6 @@ WHERE
 
 ---------------------------------------------------------------------------------------------------------------
 --  Consulta 3: Propriedades com o maior número de reviews por ano
-EXPLAIN
 WITH review_count_by_year_and_listing AS (
     SELECT 
         l.listing_id,
@@ -181,7 +177,6 @@ ORDER BY
 
 ---------------------------------------------------------------------------------------------------------------
 --  Consulta 4: Número de reviews por reviewer
--- EXPLAIN
 SELECT 
     r.reviewer_id,
     COUNT(*)
@@ -193,8 +188,6 @@ GROUP BY
 
 ---------------------------------------------------------------------------------------------------------------
 --  Consulta 5: Superhosts Instantaneamente Reserváveis
-SET enable_seqscan=off;
-EXPLAIN
 SELECT 
     l.listing_id,
     l.name,
@@ -554,15 +547,3 @@ CREATE INDEX idx_reviewer_id ON airbnb_data.reviews(reviewer_id);
     - Como consequência, o tempo de execução melhorou bastante.
 */
 ---------------------------------------------------------------------------------------------------------------
-
-SELECT
-*
-FROM
-    pg_indexes
-WHERE
-     schemaname = 'airbnb_data';
-
-DROP INDEX IF EXISTS airbnb_data.listings_neighbourhood_hash_idx;
-ALTER TABLE airbnb_data.listings DROP CONSTRAINT IF EXISTS listings_pkey;
-DROP INDEX IF EXISTS airbnb_data.reviews_review_id_hash_idx;
-DROP INDEX IF EXISTS airbnb_data.idx_reviews_listing_id_hash;
